@@ -13,6 +13,7 @@ import slideio
 import pylab as plt
 import pandas as pd
 from scipy.stats import mode
+from tqdm import tqdm, trange
 
 
 class slide_handler():
@@ -471,3 +472,185 @@ def write_out_images(
         img_path = os.path.join(output_dir, f'{name}.png')
         plt.imsave(img_path, img)
 
+
+def generate_negative_samples(img, mask):
+    """
+    Generate negative samples by creating regions without vessels.
+    
+    Inputs:
+        img: Original image
+        mask: Original mask
+        
+    Outputs:
+        neg_img: Image with negative samples
+        neg_mask: Mask for negative samples
+    """
+
+    # Create a binary mask where vessels are present
+    vessel_present = mask > 0
+    
+    # Create a copy of the original image
+    neg_img = img.copy()
+
+    # Make label area white
+    neg_img[vessel_present, :] = 255
+    
+    # Create an empty mask (all zeros)
+    neg_mask = np.zeros_like(mask)
+    
+    return neg_img, neg_mask 
+
+def generate_artificial_vessels(img, mask): 
+    """
+    Generate artificial vessel samples by warping and transforming existing vessels.
+    
+    Inputs:
+        img: Original image
+        mask: Original mask
+        
+    Outputs:
+        art_img: Image with artificial vessels 
+        art_mask: Mask for artificial vessels
+    """
+    
+    # Check if there are any vessels in the mask
+    if np.max(mask) == 0:
+        return None, None
+    
+    # Create copies of the original image and mask
+    art_img = img.copy()
+
+    img_len = img.shape[0]
+    
+    # Find vessel regions
+    vessel_regions = mask > 0
+    
+    if np.sum(vessel_regions) > 0:
+        # Extract vessel pixels
+        vessel_img = np.zeros_like(img)
+        vessel_img[vessel_regions] = img[vessel_regions]
+        
+        # Apply random transformations
+        # 1. Random rotation
+        angle = np.random.uniform(-180, 180)
+        rows, cols = vessel_img.shape[:2]
+        M = cv.getRotationMatrix2D((cols/2, rows/2), angle, 1)
+        
+        # 2. Random scaling
+        scale = np.random.uniform(0.25, 3)
+        M[:, 0:2] = M[:, 0:2] * scale
+        # x_scale = np.random.uniform(0.8, 1.2)
+        # y_scale = np.random.uniform(0.8, 1.2)
+        # M[:, 0] = M[:, 0] * x_scale
+        # M[:, 1] = M[:, 1] * y_scale
+        
+        # 3. Random translation
+        translation_factor = 0.5
+        tx = np.random.randint(-img_len * translation_factor, img_len * translation_factor)
+        ty = np.random.randint(-img_len * translation_factor, img_len * translation_factor)
+        # tx = np.random.randint(-20, 20)
+        # ty = np.random.randint(-20, 20)
+        M[0, 2] += tx
+        M[1, 2] += ty
+        
+        # Apply transformations
+        warped_vessel = cv.warpAffine(vessel_img, M, (cols, rows), borderMode=cv.BORDER_REFLECT)
+        warped_mask = cv.warpAffine(mask.astype(np.uint8), M, (cols, rows), borderMode=cv.BORDER_REFLECT)
+        
+        # Warping introduces variability, so assign value to closest in original
+        orig_mask_values = np.unique(mask)
+        warped_mask_list = []
+        for val in orig_mask_values:
+            this_mask = warped_mask.copy()
+            this_mask[warped_mask != val] = 0
+            this_mask = this_mask.astype(float)
+            val = val.astype(float)
+            max_orig = np.max(orig_mask_values).astype(float)
+            this_mask = (this_mask / val) * (val + max_orig + 1)
+            warped_mask_list.append(this_mask)
+        warped_mask = np.nansum(warped_mask_list, axis=0)
+        warped_mask = warped_mask.astype(np.uint16)
+
+        fin_mask = mask.copy()
+        fin_mask = fin_mask.astype(np.uint16)
+        fin_mask[warped_mask > 0] = warped_mask[warped_mask > 0]
+
+        # Renormalize
+        fin_mask = fin_mask / np.max(fin_mask) * 255    
+        art_mask = fin_mask.astype(np.uint8)
+
+        fig, ax = plt.subplots(1, 3)
+        ax[0].imshow(mask)
+        ax[1].imshow(warped_mask)
+        ax[2].imshow(fin_mask)
+        plt.show()
+
+        # # Renormalize mask
+        # warped_mask = warped_mask / np.max(warped_mask) * 255
+        #
+        # warped_mask = (warped_mask > 0).astype(np.uint8) * 255
+        # 
+        # # Place the warped vessel in a different location
+        # # Find non-vessel regions in the original image
+        # non_vessel = ~vessel_regions
+        # 
+        # # Create a new mask for the artificial vessel
+        # art_mask = warped_mask
+        # 
+        # Combine the original image with the warped vessel
+        art_img = img.copy()
+        art_img[warped_mask > 0] = warped_vessel[warped_mask > 0]
+        
+    return art_img, art_mask 
+
+def augment_dataset(images, masks, neg_ratio=0.2, art_ratio=0.5):
+    """
+    Augment a dataset with negative samples and artificial vessels.
+    
+    Inputs:
+        images: List of original images
+        masks: List of original masks
+        neg_ratio: Ratio of negative samples to add
+        art_ratio: Ratio of artificial vessel samples to add
+        
+    Outputs:
+        aug_images: List of augmented images
+        aug_masks: List of augmented masks
+    """
+    aug_images = images.copy()
+    aug_masks = masks.copy()
+    
+    num_orig = len(images)
+    num_neg = int(num_orig * neg_ratio)
+    num_art = int(num_orig * art_ratio)
+    
+    # Generate negative samples
+    print('Generating negative samples...')
+    for i in trange(min(num_neg, num_orig)):
+        neg_imgs, neg_msks = generate_negative_samples(images[i], masks[i])
+        aug_images.append(neg_imgs)
+        aug_masks.append(neg_msks)
+    
+    # Generate artificial vessel samples
+    print('Generating artificial vessel samples...')
+    for i in trange(min(num_art, num_orig)):
+        art_imgs, art_msks = generate_artificial_vessels(images[i], masks[i])
+        aug_images.append(art_imgs)
+        aug_masks.append(art_msks)
+    
+    return aug_images, aug_masks
+
+def gen_negative_masks(neg_dir, output_dir):
+    neg_image_names = os.listdir(neg_dir)
+    out_mask_names = [f'{name.split(".")[0]}_mask.png' for name in neg_image_names]
+    for img_name, mask_name in zip(neg_image_names, out_mask_names):
+        img_path = os.path.join(neg_dir, img_name)
+        mask_path = os.path.join(output_dir, mask_name)
+        img = plt.imread(img_path)
+        mask = np.zeros_like(img)
+        plt.imsave(mask_path, mask)
+
+
+# neg_dir = '/home/abuzarmahmood/projects/auto_slide/data/labelled_images/negative_images'
+# out_dir = '/home/abuzarmahmood/projects/auto_slide/data/labelled_images/negative_masks'
+# gen_negative_masks(neg_dir, out_dir)

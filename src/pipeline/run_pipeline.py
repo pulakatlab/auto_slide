@@ -40,6 +40,8 @@ def parse_args():
                         help='Skip initial and final annotation steps')
     parser.add_argument('--skip_training', action='store_true',
                         help='Skip model training step')
+    parser.add_argument('--no_augmentation', action='store_true',
+                        help='Disable dataset augmentation during training')
     return parser.parse_args()
 
 def run_initial_annotation(data_dir=None):
@@ -85,12 +87,15 @@ def run_region_suggestion(data_dir=None):
         logger.error(f"Error in region suggestion: {str(e)}")
         return False
 
-def run_model_training(data_dir=None):
+def run_model_training(data_dir=None, use_augmentation=True):
     """Run the model training step"""
     logger.info("Starting model training...")
+    if use_augmentation:
+        logger.info("Using dataset augmentation with negative samples and artificial vessels")
     from model.training import main as training_main
     
     try:
+        # Note: The training.py script now handles augmentation internally
         training_main()
         logger.info("Model training completed successfully")
         return True
@@ -131,7 +136,7 @@ def main():
         logger.warning("Region suggestion failed, but continuing pipeline...")
     
     if not args.skip_training:
-        if not run_model_training(args.data_dir):
+        if not run_model_training(args.data_dir, use_augmentation=not args.no_augmentation):
             logger.warning("Model training failed, but continuing pipeline...")
     else:
         logger.info("Skipping model training as requested")
