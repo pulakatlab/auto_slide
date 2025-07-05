@@ -16,6 +16,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
+import cv2
 
 from autoslide import config
 from autoslide.pipeline.model.prediction_utils import load_model, predict_single_image
@@ -33,7 +34,7 @@ def find_images_to_process():
     Find all images that need prediction and don't already have masks.
 
     Returns:
-        list: List of dictionaries containing image paths and corresponding mask paths
+        list: List of dictionaries containing image paths and corresponding mask and overlay paths
     """
     suggested_regions_dir = os.path.join(data_dir, 'suggested_regions')
 
@@ -56,16 +57,24 @@ def find_images_to_process():
         # Replace 'images' with 'masks' and add '_mask' suffix
         mask_path = image_path.replace('/images/', '/masks/')
         mask_path = mask_path.replace('.png', '_mask.png')
+        
+        # Determine corresponding overlay path
+        # Replace 'images' with 'overlays' and add '_overlay' suffix
+        overlay_path = image_path.replace('/images/', '/overlays/')
+        overlay_path = overlay_path.replace('.png', '_overlay.png')
 
         # Check if mask already exists
         if not os.path.exists(mask_path):
-            # Create mask directory if it doesn't exist
+            # Create mask and overlay directories if they don't exist
             mask_dir = os.path.dirname(mask_path)
+            overlay_dir = os.path.dirname(overlay_path)
             os.makedirs(mask_dir, exist_ok=True)
+            os.makedirs(overlay_dir, exist_ok=True)
 
             images_to_process.append({
                 'image_path': image_path,
                 'mask_path': mask_path,
+                'overlay_path': overlay_path,
                 'image_name': os.path.basename(image_path)
             })
         else:
@@ -94,6 +103,42 @@ def predict_image_from_path(model, image_path, device, transform):
     except Exception as e:
         print(f"Error processing {image_path}: {e}")
         return None
+
+
+def create_overlay_image(image_path, predicted_mask, overlay_path):
+    """
+    Create an overlay image with the original image and predicted region outline.
+
+    Args:
+        image_path (str): Path to original image
+        predicted_mask (numpy.ndarray): Predicted mask
+        overlay_path (str): Path where overlay will be saved
+    """
+    try:
+        # Load original image
+        img = Image.open(image_path).convert("RGB")
+        img_array = np.array(img)
+        
+        # Create binary mask from prediction
+        binary_mask = (predicted_mask > 127).astype(np.uint8)
+        
+        # Find contours of the predicted regions
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Create overlay image
+        overlay_img = img_array.copy()
+        
+        # Draw contours on the overlay image
+        if len(contours) > 0:
+            # Draw contours in red with thickness 2
+            cv2.drawContours(overlay_img, contours, -1, (255, 0, 0), 2)
+        
+        # Save overlay image
+        overlay_pil = Image.fromarray(overlay_img)
+        overlay_pil.save(overlay_path)
+        
+    except Exception as e:
+        print(f"Error creating overlay for {image_path}: {e}")
 
 
 def save_prediction_visualization(image_path, mask_path, predicted_mask, plot_dir):
@@ -184,6 +229,7 @@ def process_all_images(model_path=None, save_visualizations=False, max_images=No
     for item in tqdm(images_to_process, desc="Processing images"):
         image_path = item['image_path']
         mask_path = item['mask_path']
+        overlay_path = item['overlay_path']
         image_name = item['image_name']
 
         # Perform prediction
@@ -195,6 +241,9 @@ def process_all_images(model_path=None, save_visualizations=False, max_images=No
                 # Save predicted mask
                 mask_img = Image.fromarray(predicted_mask, mode='L')
                 mask_img.save(mask_path)
+                
+                # Create and save overlay image
+                create_overlay_image(image_path, predicted_mask, overlay_path)
 
                 # Save visualization if requested
                 if save_visualizations:
@@ -202,10 +251,10 @@ def process_all_images(model_path=None, save_visualizations=False, max_images=No
                         image_path, mask_path, predicted_mask, plot_dir)
 
                 successful_predictions += 1
-                print(f"Saved mask for {image_name} to {mask_path}")
+                print(f"Saved mask and overlay for {image_name}")
 
             except Exception as e:
-                print(f"Error saving mask for {image_name}: {e}")
+                print(f"Error saving outputs for {image_name}: {e}")
                 failed_predictions += 1
         else:
             failed_predictions += 1
