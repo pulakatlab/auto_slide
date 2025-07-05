@@ -11,9 +11,9 @@ Resources
 
 
 from autoslide.pipeline.model.training_utils import (
-    setup_directories, initialize_model,
-    setup_training, train_model, plot_losses, evaluate_model, load_model
+    setup_directories, setup_training, train_model, plot_losses, evaluate_model, load_model
 )
+from autoslide.pipeline.model.prediction_utils import initialize_model
 from autoslide.pipeline.model.data_preprocessing import (
     prepare_data, plot_augmented_samples, create_sample_plots
 )

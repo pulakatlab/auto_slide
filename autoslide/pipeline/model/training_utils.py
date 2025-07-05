@@ -5,10 +5,9 @@ import matplotlib.pyplot as plt
 import torch
 import cv2 as cv  # Alias cv2 as cv for consistency
 from torchvision.transforms import v2 as T
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from tqdm import tqdm, trange
-import torchvision
+
+from autoslide.pipeline.model.prediction_utils import initialize_model
 
 #############################################################################
 # Directory and Data Management Functions
@@ -44,35 +43,6 @@ def setup_directories(data_dir=None):
 #############################################################################
 
 
-def initialize_model():
-    """
-    Initialize and configure the Mask R-CNN model.
-
-    Creates a Mask R-CNN model with ResNet-50 backbone and FPN,
-    and configures it for binary segmentation (background and vessel).
-
-    Returns:
-        torchvision.models.detection.MaskRCNN: Configured Mask R-CNN model
-    """
-    print('Initializing Mask R-CNN model...')
-    model = torchvision.models.detection.maskrcnn_resnet50_fpn()
-
-    # Configure for binary classification (background + vessel)
-    num_classes = 2
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-
-    in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
-    hidden_layer = 256
-    model.roi_heads.mask_predictor = MaskRCNNPredictor(
-        in_features_mask, hidden_layer, num_classes)
-
-    print(f'Model configured for {num_classes} classes (background + vessel)')
-    print(f'Box predictor input features: {in_features}')
-    print(
-        f'Mask predictor input features: {in_features_mask}, hidden layer: {hidden_layer}')
-
-    return model
 
 
 

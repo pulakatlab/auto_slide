@@ -8,15 +8,11 @@ This module provides:
 """
 
 import os
-import time
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 import torch
-import torchvision
 from torchvision import transforms as T
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from tqdm import tqdm
 import argparse
 from sklearn.metrics import precision_recall_curve, average_precision_score
@@ -25,7 +21,7 @@ import cv2 as cv
 # Import config and utilities
 from autoslide import config
 from autoslide.pipeline.model.data_preprocessing import load_data, split_train_val
-from autoslide.pipeline.model.training_utils import initialize_model, load_model
+from autoslide.pipeline.model.prediction_utils import load_model, predict_single_image, setup_device
 
 # Get directories from config
 data_dir = config['data_dir']
@@ -136,51 +132,6 @@ def calculate_pixel_accuracy(pred_mask, true_mask, threshold=0.5):
 # Model Prediction Functions
 #############################################################################
 
-def predict_single_image(model, image, device, transform):
-    """
-    Predict mask for a single image.
-
-    Args:
-        model (torch.nn.Module): Trained Mask R-CNN model
-        image (PIL.Image): Input image
-        device (torch.device): Device to run inference on
-        transform (callable): Image transformation function
-
-    Returns:
-        tuple: (prediction_time, combined_mask) - Time taken and predicted mask
-    """
-    # Transform image
-    img_tensor = transform(image).to(device)
-
-    # Measure prediction time
-    start_time = time.time()
-
-    with torch.no_grad():
-        predictions = model([img_tensor])
-
-    end_time = time.time()
-    prediction_time = end_time - start_time
-
-    # Combine all predicted masks
-    pred = predictions[0]
-    if len(pred["masks"]) > 0:
-        # Combine all masks with confidence weighting
-        masks = pred["masks"].cpu().numpy()
-        scores = pred["scores"].cpu().numpy()
-
-        # Weight masks by their confidence scores
-        combined_mask = np.zeros_like(masks[0, 0])
-        for mask, score in zip(masks, scores):
-            combined_mask += mask[0] * score
-
-        # Normalize to 0-1 range
-        if combined_mask.max() > 0:
-            combined_mask = combined_mask / combined_mask.max()
-    else:
-        # No predictions
-        combined_mask = np.zeros((img_tensor.shape[1], img_tensor.shape[2]))
-
-    return prediction_time, combined_mask
 
 
 #############################################################################
@@ -248,7 +199,7 @@ def evaluate_model_accuracy(model, val_imgs, val_masks, img_dir, mask_dir,
 
             # Get prediction
             pred_time, pred_mask = predict_single_image(
-                model, image, device, transform)
+                model, image, device, transform, return_time=True)
 
             # Calculate metrics
             iou = calculate_iou(pred_mask, true_mask)
@@ -330,7 +281,7 @@ def benchmark_prediction_speed(model, val_imgs, img_dir, aug_img_dir,
         else:
             image = Image.open(os.path.join(img_dir, img_name)).convert("RGB")
 
-        _ = predict_single_image(model, image, device, transform)
+        _ = predict_single_image(model, image, device, transform, return_time=False)
 
     # Benchmark phase
     print(f'Benchmarking with {num_benchmark} iterations...')
@@ -345,7 +296,7 @@ def benchmark_prediction_speed(model, val_imgs, img_dir, aug_img_dir,
         else:
             image = Image.open(os.path.join(img_dir, img_name)).convert("RGB")
 
-        pred_time, _ = predict_single_image(model, image, device, transform)
+        pred_time, _ = predict_single_image(model, image, device, transform, return_time=True)
         benchmark_times.append(pred_time)
 
     # Calculate speed metrics
@@ -523,7 +474,7 @@ def create_sample_predictions_plot(model, val_imgs, val_masks, img_dir, mask_dir
             true_mask = np.array(Image.open(os.path.join(mask_dir, mask_name)))
 
         # Get prediction
-        _, pred_mask = predict_single_image(model, image, device, transform)
+        pred_mask = predict_single_image(model, image, device, transform, return_time=False)
 
         # Calculate metrics for this sample
         iou = calculate_iou(pred_mask, true_mask)
@@ -651,7 +602,7 @@ def main():
     print("Starting model evaluation...")
 
     # Setup device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = setup_device()
     print(f'Using device: {device}')
 
     # Load data
@@ -665,27 +616,17 @@ def main():
     aug_img_dir = os.path.join(labelled_data_dir, 'augmented_images/')
     aug_mask_dir = os.path.join(labelled_data_dir, 'augmented_masks/')
 
-    # Initialize and load model
+    # Load model
     print("Loading trained model...")
-    model = initialize_model()
-
-    # Determine model path
-    if args.model_path:
-        model_path = args.model_path
-    else:
-        model_path = os.path.join(
-            artifacts_dir, 'best_val_mask_rcnn_model.pth')
-
-    if not os.path.exists(model_path):
-        print(f"Error: Model file not found at {model_path}")
+    try:
+        model, device, transform = load_model(args.model_path, device)
+        model_path = args.model_path if args.model_path else os.path.join(artifacts_dir, 'best_val_mask_rcnn_model.pth')
+        print(f"Model loaded from: {model_path}")
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
         print("Please train a model first or specify a valid model path.")
         return
 
-    model = load_model(model, model_path, device)
-    print(f"Model loaded from: {model_path}")
-
-    # Setup transform
-    transform = T.ToTensor()
 
     # Evaluate accuracy
     print("\nEvaluating model accuracy...")
