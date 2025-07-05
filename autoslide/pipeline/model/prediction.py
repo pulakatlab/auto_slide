@@ -1,7 +1,13 @@
 """
-For prediction on every section, perform prediction on a radius larger than the image
-and aggregate the predictions.
+Batch prediction script for vessel segmentation on all images in suggested_regions.
+
+This script:
+1. Finds all images under data_dir/suggested_regions/*/images/*.png
+2. Checks if corresponding masks already exist
+3. Performs prediction only on images without existing masks
+4. Saves predicted masks to corresponding mask directories
 """
+
 from autoslide.pipeline import utils
 import os
 import slideio
@@ -21,195 +27,293 @@ from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from PIL import Image
 from importlib import reload
 from autoslide import config
+from tqdm import tqdm
+import argparse
 
 # Get directories from config
 data_dir = config['data_dir']
 artifacts_dir = config['artifacts_dir']
 plot_dir = config['plot_dirs']
 
-##############################
-mask_dir = os.path.join(data_dir, 'final_annotation')
-metadata_dir = os.path.join(data_dir, 'initial_annotation')
-section_dir = os.path.join(data_dir, 'suggested_regions')
-data_path_list = glob(os.path.join(data_dir, '**', '*TRI*.svs'))
 
-# Get paths to all metadata files
-metadata_path_list = glob(os.path.join(
-    section_dir, '**', '*TRI*.csv'), recursive=True)
-# mask_path_list = glob(os.path.join(mask_dir, '*TRI*.png'))
-basenames = [os.path.basename(os.path.dirname(path))
-             for path in metadata_path_list]
-
-basenames = sorted(basenames)
-metadata_path_list = sorted(metadata_path_list)
-# mask_path_list = sorted(mask_path_list)
-
-matched_data_paths = [
-    [x for x in data_path_list if basename in x.replace('-', '_')][0]
-    for basename in basenames]
-
-metadata_df = pd.DataFrame(
-    data={
-        'basename': basenames,
-        'metadata_path': metadata_path_list,
-        'data_path': matched_data_paths,
-        # 'mask_path': mask_path_list
-    }
-)
-
-# Assert that each basename is in both metadata and mask paths
-check_bool = []
-for i, row in metadata_df.iterrows():
-    check_bool.append(row['basename'] in row['metadata_path'])
-    # check_bool.append(row['basename'] in row['mask_path'])
-
-assert all(check_bool), "Error: basename not found in metadata or mask path"
-
-# Load each metadata file and add basename to the dataframe
-metadata_list = []
-for i, row in metadata_df.iterrows():
-    metadata = pd.read_csv(row['metadata_path'])
-    metadata['basename'] = row['basename']
-    metadata['data_path'] = row['data_path']
-    metadata_list.append(metadata)
-
-fin_metadata_df = pd.concat(metadata_list)
-fin_metadata_df = fin_metadata_df.drop_duplicates(subset='section_hash')
-
-##############################
-# Expand original section
-##############################
-og_image_path = os.path.join(
-    data_dir,
-    'labelled_images/images/1_heart_1022472553.png'
-)
-
-# og_image_path = os.path.join(
-#         data_dir,
-#         'suggested_regions/TRI_130_163A_40490/images/4_heart_6988590045.png'
-#         )
-# sec_name = '4_heart_6988590045'
-sec_name = os.path.basename(og_image_path).split('.')[0]
-sec_hash = int(sec_name.split('_')[-1])
-
-sec_metadata = fin_metadata_df[fin_metadata_df['section_hash'] == sec_hash]
-
-data_path = sec_metadata.data_path.values[0]
-slide = slideio.open_slide(data_path, 'SVS')
-scene = slide.get_scene(0)
-
-wanted_section = eval(sec_metadata.section_bounds.values[0])
-# utils.visualize_sections(
-#     scene,
-#     [wanted_section],
-#     )
-
-# Get region around section
-expand_ratio = 1.5
-section_center = [int((wanted_section[0] + wanted_section[2])/2),
-                  int((wanted_section[1] + wanted_section[3])/2)]
-x_radius = int((wanted_section[2] - wanted_section[0])/2 * expand_ratio)
-y_radius = int((wanted_section[3] - wanted_section[1])/2 * expand_ratio)
-
-expanded_section = [
-    section_center[0] - x_radius,
-    section_center[1] - y_radius,
-    section_center[0] + x_radius,
-    section_center[1] + y_radius
-]
-
-expanded_section_size = (
-    expanded_section[2] - expanded_section[0],
-    expanded_section[3] - expanded_section[1]
-)
-
-expanded_img = utils.get_section(scene, expanded_section, down_sample=10)
-
-og_img = plt.imread(og_image_path)
-fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-ax[0].imshow(og_img)
-ax[1].imshow(expanded_img)
-# Draw rectangle around wanted section
-img_center = [int(expanded_img.shape[1]/2), int(expanded_img.shape[0]/2)]
-x_radius = expanded_img.shape[0] / 2
-y_radius = expanded_img.shape[1] / 2
-adj_x_rad = x_radius / expand_ratio
-adj_y_rad = y_radius / expand_ratio
-ax[1].add_patch(plt.Rectangle(
-    (img_center[0] - adj_x_rad, img_center[1] - adj_y_rad),
-    2*adj_x_rad, 2*adj_y_rad,
-    edgecolor='y',
-    facecolor='none'
-))
-ax[0].set_title('Original Image')
-ax[1].set_title('Expanded Image')
-fig.suptitle(sec_name)
-fig.savefig(os.path.join(plot_dir, f'{sec_name}_expansion_comparison.png'))
-# plt.show()
-plt.close(fig)
-
-##############################
-# Perform prediction by stepping through expanded section
-##############################
-
-# step_list = gen_step_windows(
-#         window_shape = np.array(expanded_img.shape[:2]) // 2,
-#         image_shape = expanded_img.shape[:2],
-#         overlap = 0.8,
-#         )
-# step_list = np.array(step_list)
-#
-step_list = utils.gen_step_windows(
-    window_shape=np.array(expanded_section_size) // 2,
-    image_shape=expanded_section_size,
-    overlap=0.5,
-)
-step_list = np.array(step_list)
-step_list[:, 0] = step_list[:, 0] + expanded_section[0]
-step_list[:, 1] = step_list[:, 1] + expanded_section[1]
-step_list[:, 2] = step_list[:, 2] + expanded_section[0]
-step_list[:, 3] = step_list[:, 3] + expanded_section[1]
-
-reload(utils)
-
-# Plot step_list
-fig, ax = utils.visualize_sections(
-    scene, step_list, return_image=True, crop_to_sections=True,
-    down_sample=10,
-    edgecolor=np.arange(len(step_list)),
-    linewidth=5,
-)
-fig.suptitle('Expanded Section Step List')
-fig.savefig(os.path.join(
-    plot_dir, f'{sec_name}_expanded_section_step_list.png'))
-plt.close(fig)
-
-##############################
-# Load model
-model_save_path = os.path.join(artifacts_dir, 'mask_rcnn_model.pth')
-
-# Recrate base model
-model = torchvision.models.detection.maskrcnn_resnet50_fpn()
-in_features = model.roi_heads.box_predictor.cls_score.in_features
-model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 2)
-in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
-hidden_layer = 256
-model.roi_heads.mask_predictor = MaskRCNNPredictor(
-    in_features_mask, hidden_layer, 2)
-
-# Load model weights
-model.load_state_dict(torch.load(model_save_path, weights_only=True))
-model.eval()
+def load_model(model_path=None):
+    """
+    Load the trained Mask R-CNN model.
+    
+    Args:
+        model_path (str): Path to the saved model. If None, uses default path.
+        
+    Returns:
+        tuple: (model, device, transform) - Loaded model, device, and transform
+    """
+    if model_path is None:
+        model_path = os.path.join(artifacts_dir, 'best_val_mask_rcnn_model.pth')
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found at {model_path}")
+    
+    # Recreate base model
+    model = torchvision.models.detection.maskrcnn_resnet50_fpn()
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 2)
+    in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
+    hidden_layer = 256
+    model.roi_heads.mask_predictor = MaskRCNNPredictor(
+        in_features_mask, hidden_layer, 2)
+    
+    # Load model weights
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    model.to(device)
+    
+    transform = T.ToTensor()
+    
+    print(f"Model loaded from: {model_path}")
+    print(f"Using device: {device}")
+    
+    return model, device, transform
 
 
-transform = T.ToTensor()
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+def find_images_to_process():
+    """
+    Find all images that need prediction and don't already have masks.
+    
+    Returns:
+        list: List of dictionaries containing image paths and corresponding mask paths
+    """
+    suggested_regions_dir = os.path.join(data_dir, 'suggested_regions')
+    
+    if not os.path.exists(suggested_regions_dir):
+        print(f"Suggested regions directory not found: {suggested_regions_dir}")
+        return []
+    
+    # Find all image files
+    image_pattern = os.path.join(suggested_regions_dir, '**', 'images', '*.png')
+    image_paths = glob(image_pattern, recursive=True)
+    
+    print(f"Found {len(image_paths)} images in suggested_regions")
+    
+    images_to_process = []
+    
+    for image_path in image_paths:
+        # Determine corresponding mask path
+        # Replace 'images' with 'masks' and add '_mask' suffix
+        mask_path = image_path.replace('/images/', '/masks/')
+        mask_path = mask_path.replace('.png', '_mask.png')
+        
+        # Check if mask already exists
+        if not os.path.exists(mask_path):
+            # Create mask directory if it doesn't exist
+            mask_dir = os.path.dirname(mask_path)
+            os.makedirs(mask_dir, exist_ok=True)
+            
+            images_to_process.append({
+                'image_path': image_path,
+                'mask_path': mask_path,
+                'image_name': os.path.basename(image_path)
+            })
+        else:
+            print(f"Mask already exists for {os.path.basename(image_path)}, skipping")
+    
+    print(f"Found {len(images_to_process)} images that need prediction")
+    return images_to_process
 
-img = Image.open(og_image_path).convert("RGB")
-ig = transform(expanded_img)
-with torch.no_grad():
-    pred = model([ig.to(device)])
-n_preds = len(pred[0]["masks"])
-all_preds = np.stack([(pred[0]["masks"][i].cpu().detach().numpy(
-) * 255).astype("uint8").squeeze() for i in range(n_preds)])
+
+def predict_single_image(model, image_path, device, transform):
+    """
+    Perform prediction on a single image.
+    
+    Args:
+        model: Trained Mask R-CNN model
+        image_path (str): Path to the input image
+        device: PyTorch device
+        transform: Image transformation function
+        
+    Returns:
+        numpy.ndarray: Combined predicted mask
+    """
+    try:
+        # Load and preprocess image
+        img = Image.open(image_path).convert("RGB")
+        img_tensor = transform(img).to(device)
+        
+        # Perform prediction
+        with torch.no_grad():
+            pred = model([img_tensor])
+        
+        # Combine all predicted masks
+        n_preds = len(pred[0]["masks"])
+        if n_preds > 0:
+            # Stack all predictions and take the mean
+            all_preds = np.stack([
+                (pred[0]["masks"][i].cpu().detach().numpy() * 255).astype("uint8").squeeze()
+                for i in range(n_preds)
+            ])
+            
+            # Weight by confidence scores if available
+            if len(pred[0]["scores"]) > 0:
+                scores = pred[0]["scores"].cpu().detach().numpy()
+                weighted_mask = np.zeros_like(all_preds[0], dtype=np.float32)
+                total_weight = 0
+                
+                for mask, score in zip(all_preds, scores):
+                    weighted_mask += mask.astype(np.float32) * score
+                    total_weight += score
+                
+                if total_weight > 0:
+                    combined_mask = (weighted_mask / total_weight).astype(np.uint8)
+                else:
+                    combined_mask = all_preds.mean(axis=0).astype(np.uint8)
+            else:
+                combined_mask = all_preds.mean(axis=0).astype(np.uint8)
+        else:
+            # No predictions found
+            img_array = np.array(img)
+            combined_mask = np.zeros((img_array.shape[0], img_array.shape[1]), dtype=np.uint8)
+        
+        return combined_mask
+        
+    except Exception as e:
+        print(f"Error processing {image_path}: {e}")
+        return None
+
+
+def save_prediction_visualization(image_path, mask_path, predicted_mask, plot_dir):
+    """
+    Save a visualization of the prediction for quality control.
+    
+    Args:
+        image_path (str): Path to original image
+        mask_path (str): Path where mask will be saved
+        predicted_mask (numpy.ndarray): Predicted mask
+        plot_dir (str): Directory to save visualization
+    """
+    try:
+        # Create visualization directory
+        vis_dir = os.path.join(plot_dir, 'prediction_visualizations')
+        os.makedirs(vis_dir, exist_ok=True)
+        
+        # Load original image
+        img = Image.open(image_path).convert("RGB")
+        
+        # Create visualization
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        
+        # Original image
+        axes[0].imshow(img)
+        axes[0].set_title('Original Image')
+        axes[0].axis('off')
+        
+        # Predicted mask
+        axes[1].imshow(predicted_mask, cmap='gray')
+        axes[1].set_title('Predicted Mask')
+        axes[1].axis('off')
+        
+        # Overlay
+        overlay = np.array(img)
+        mask_binary = predicted_mask > 127
+        overlay[mask_binary] = [255, 0, 0]  # Red overlay for vessels
+        
+        axes[2].imshow(overlay)
+        axes[2].set_title('Overlay (Red = Vessels)')
+        axes[2].axis('off')
+        
+        # Save visualization
+        vis_filename = os.path.basename(image_path).replace('.png', '_prediction.png')
+        vis_path = os.path.join(vis_dir, vis_filename)
+        plt.tight_layout()
+        plt.savefig(vis_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        
+    except Exception as e:
+        print(f"Error creating visualization for {image_path}: {e}")
+
+
+def process_all_images(model_path=None, save_visualizations=False, max_images=None):
+    """
+    Process all images that need prediction.
+    
+    Args:
+        model_path (str): Path to saved model
+        save_visualizations (bool): Whether to save prediction visualizations
+        max_images (int): Maximum number of images to process (for testing)
+    """
+    print("Starting batch prediction on suggested regions...")
+    
+    # Load model
+    model, device, transform = load_model(model_path)
+    
+    # Find images to process
+    images_to_process = find_images_to_process()
+    
+    if not images_to_process:
+        print("No images found that need prediction.")
+        return
+    
+    # Limit number of images if specified
+    if max_images and max_images < len(images_to_process):
+        images_to_process = images_to_process[:max_images]
+        print(f"Limited processing to {max_images} images for testing")
+    
+    # Process each image
+    successful_predictions = 0
+    failed_predictions = 0
+    
+    for item in tqdm(images_to_process, desc="Processing images"):
+        image_path = item['image_path']
+        mask_path = item['mask_path']
+        image_name = item['image_name']
+        
+        # Perform prediction
+        predicted_mask = predict_single_image(model, image_path, device, transform)
+        
+        if predicted_mask is not None:
+            try:
+                # Save predicted mask
+                mask_img = Image.fromarray(predicted_mask, mode='L')
+                mask_img.save(mask_path)
+                
+                # Save visualization if requested
+                if save_visualizations:
+                    save_prediction_visualization(image_path, mask_path, predicted_mask, plot_dir)
+                
+                successful_predictions += 1
+                
+            except Exception as e:
+                print(f"Error saving mask for {image_name}: {e}")
+                failed_predictions += 1
+        else:
+            failed_predictions += 1
+    
+    print(f"\nBatch prediction complete!")
+    print(f"Successful predictions: {successful_predictions}")
+    print(f"Failed predictions: {failed_predictions}")
+    print(f"Total processed: {successful_predictions + failed_predictions}")
+
+
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Batch prediction on suggested regions')
+    parser.add_argument('--model-path', type=str, default=None,
+                        help='Path to saved model (default: best_val_mask_rcnn_model.pth)')
+    parser.add_argument('--save-visualizations', action='store_true',
+                        help='Save prediction visualizations for quality control')
+    parser.add_argument('--max-images', type=int, default=None,
+                        help='Maximum number of images to process (for testing)')
+    return parser.parse_args()
+
+
+def main():
+    """Main function"""
+    args = parse_args()
+    
+    process_all_images(
+        model_path=args.model_path,
+        save_visualizations=args.save_visualizations,
+        max_images=args.max_images
+    )
+
+
+if __name__ == "__main__":
+    main()
