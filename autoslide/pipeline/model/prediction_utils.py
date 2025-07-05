@@ -51,33 +51,34 @@ def initialize_model():
 def load_model(model_path=None, device=None):
     """
     Load the trained Mask R-CNN model.
-    
+
     Args:
         model_path (str): Path to the saved model. If None, uses default path.
         device (torch.device): Device to load model on. If None, auto-detects.
-        
+
     Returns:
         tuple: (model, device, transform) - Loaded model, device, and transform
     """
     if model_path is None:
-        model_path = os.path.join(artifacts_dir, 'best_val_mask_rcnn_model.pth')
-    
+        model_path = os.path.join(
+            artifacts_dir, 'best_val_mask_rcnn_model.pth')
+
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found at {model_path}")
-    
+
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     # Initialize model structure
     model = initialize_model()
-    
+
     # Load model weights
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     model.to(device)
-    
+
     transform = T.ToTensor()
-    
+
     return model, device, transform
 
 
@@ -94,13 +95,16 @@ def predict_single_image(model, image, device, transform, return_time=False):
 
     Returns:
         numpy.ndarray or tuple: Combined predicted mask, optionally with prediction time
+
+
+    TODO: Set threshold for minimum confidence score for masks to accept
     """
     # Handle both PIL Image and file path inputs
     if isinstance(image, str):
         image = Image.open(image).convert("RGB")
     elif not isinstance(image, Image.Image):
         raise ValueError("Image must be PIL.Image or file path string")
-    
+
     # Transform image
     img_tensor = transform(image).to(device)
 
@@ -123,7 +127,7 @@ def predict_single_image(model, image, device, transform, return_time=False):
         # Weight masks by their confidence scores
         combined_mask = np.zeros_like(masks[0, 0])
         total_weight = 0
-        
+
         for mask, score in zip(masks, scores):
             combined_mask += mask[0] * score
             total_weight += score
@@ -131,16 +135,17 @@ def predict_single_image(model, image, device, transform, return_time=False):
         # Normalize to 0-1 range, then convert to 0-255
         if total_weight > 0:
             combined_mask = combined_mask / total_weight
-        
+
         if combined_mask.max() > 0:
             combined_mask = combined_mask / combined_mask.max()
-        
+
         # Convert to uint8 (0-255 range)
         combined_mask = (combined_mask * 255).astype(np.uint8)
     else:
         # No predictions - create empty mask
         img_array = np.array(image)
-        combined_mask = np.zeros((img_array.shape[0], img_array.shape[1]), dtype=np.uint8)
+        combined_mask = np.zeros(
+            (img_array.shape[0], img_array.shape[1]), dtype=np.uint8)
 
     if return_time:
         return prediction_time, combined_mask
@@ -151,7 +156,7 @@ def predict_single_image(model, image, device, transform, return_time=False):
 def setup_device():
     """
     Setup and return the appropriate device for inference.
-    
+
     Returns:
         torch.device: Device to use for inference
     """

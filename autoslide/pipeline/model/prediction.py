@@ -57,7 +57,7 @@ def find_images_to_process():
         # Replace 'images' with 'masks' and add '_mask' suffix
         mask_path = image_path.replace('/images/', '/masks/')
         mask_path = mask_path.replace('.png', '_mask.png')
-        
+
         # Determine corresponding overlay path
         # Replace 'images' with 'overlays' and add '_overlay' suffix
         overlay_path = image_path.replace('/images/', '/overlays/')
@@ -118,25 +118,26 @@ def create_overlay_image(image_path, predicted_mask, overlay_path):
         # Load original image
         img = Image.open(image_path).convert("RGB")
         img_array = np.array(img)
-        
+
         # Create binary mask from prediction
         binary_mask = (predicted_mask > 127).astype(np.uint8)
-        
+
         # Find contours of the predicted regions
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+        contours, _ = cv2.findContours(
+            binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
         # Create overlay image
         overlay_img = img_array.copy()
-        
+
         # Draw contours on the overlay image
         if len(contours) > 0:
             # Draw contours in red with thickness 2
-            cv2.drawContours(overlay_img, contours, -1, (255, 0, 0), 2)
-        
+            cv2.drawContours(overlay_img, contours, -1, (255, 255, 0), 3)
+
         # Save overlay image
         overlay_pil = Image.fromarray(overlay_img)
         overlay_pil.save(overlay_path)
-        
+
     except Exception as e:
         print(f"Error creating overlay for {image_path}: {e}")
 
@@ -241,7 +242,7 @@ def process_all_images(model_path=None, save_visualizations=False, max_images=No
                 # Save predicted mask
                 mask_img = Image.fromarray(predicted_mask, mode='L')
                 mask_img.save(mask_path)
-                
+
                 # Create and save overlay image
                 create_overlay_image(image_path, predicted_mask, overlay_path)
 
@@ -251,7 +252,8 @@ def process_all_images(model_path=None, save_visualizations=False, max_images=No
                         image_path, mask_path, predicted_mask, plot_dir)
 
                 successful_predictions += 1
-                print(f"Saved mask and overlay for {image_name}")
+                print(
+                    f"Saved mask and overlay for {image_name}, parent_dir: {os.path.dirname(mask_path)}")
 
             except Exception as e:
                 print(f"Error saving outputs for {image_name}: {e}")
